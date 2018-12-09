@@ -39,7 +39,7 @@ struct _FlatpakPolkitAgentTextListener
 {
   PolkitAgentListener parent_instance;
 
-  GSimpleAsyncResult *simple;
+  GTask *task;
   PolkitAgentSession *active_session;
   gulong cancel_id;
   GCancellable *cancellable;
@@ -179,14 +179,14 @@ on_completed (PolkitAgentSession *session,
     }
   fflush (listener->tty);
 
-  g_simple_async_result_complete_in_idle (listener->simple);
+  g_task_return_boolean (listener->task, TRUE);
 
-  g_object_unref (listener->simple);
+  g_object_unref (listener->task);
   g_object_unref (listener->active_session);
   g_cancellable_disconnect (listener->cancellable, listener->cancel_id);
   g_object_unref (listener->cancellable);
 
-  listener->simple = NULL;
+  listener->task = NULL;
   listener->active_session = NULL;
   listener->cancel_id = 0;
 }
@@ -389,19 +389,17 @@ flatpak_polkit_agent_text_listener_initiate_authentication (PolkitAgentListener 
                                                             gpointer              user_data)
 {
   FlatpakPolkitAgentTextListener *listener = FLATPAK_POLKIT_AGENT_TEXT_LISTENER (_listener);
-  GSimpleAsyncResult *simple;
+  GTask *task;
   PolkitIdentity *identity;
 
-  simple = g_simple_async_result_new (G_OBJECT (listener),
-                                      callback,
-                                      user_data,
-                                      flatpak_polkit_agent_text_listener_initiate_authentication);
+  task = g_task_new (G_OBJECT (listener), cancellable, callback, user_data);
+  g_task_set_source_tag (task, flatpak_polkit_agent_text_listener_initiate_authentication);
+
   if (listener->active_session != NULL)
     {
-      g_simple_async_result_set_error (simple, POLKIT_ERROR, POLKIT_ERROR_FAILED,
-                                       "An authentication session is already underway.");
-      g_simple_async_result_complete_in_idle (simple);
-      g_object_unref (simple);
+      g_task_return_new_error (task, POLKIT_ERROR, POLKIT_ERROR_FAILED,
+                               "An authentication session is already underway.");
+      g_object_unref (task);
       goto out;
     }
 
@@ -429,12 +427,9 @@ flatpak_polkit_agent_text_listener_initiate_authentication (PolkitAgentListener 
           fprintf (listener->tty, "==== AUTHENTICATION CANCELED ====\n");
           fprintf (listener->tty, "\x1B[0m");
           fflush (listener->tty);
-          g_simple_async_result_set_error (simple,
-                                           POLKIT_ERROR,
-                                           POLKIT_ERROR_FAILED,
-                                           "Authentication was canceled.");
-          g_simple_async_result_complete_in_idle (simple);
-          g_object_unref (simple);
+          g_task_return_new_error (task, POLKIT_ERROR, POLKIT_ERROR_FAILED,
+                                   "Authentication was canceled.");
+          g_object_unref (task);
           goto out;
         }
     }
@@ -467,7 +462,7 @@ flatpak_polkit_agent_text_listener_initiate_authentication (PolkitAgentListener 
                     G_CALLBACK (on_show_error),
                     listener);
 
-  listener->simple = simple;
+  listener->task = task;
   listener->cancellable = g_object_ref (cancellable);
   listener->cancel_id = g_cancellable_connect (cancellable,
                                                G_CALLBACK (on_cancelled),
@@ -485,11 +480,8 @@ flatpak_polkit_agent_text_listener_initiate_authentication_finish (PolkitAgentLi
                                                                    GAsyncResult         *res,
                                                                    GError              **error)
 {
-  g_warn_if_fail (g_simple_async_result_get_source_tag (G_SIMPLE_ASYNC_RESULT (res)) ==
+  g_warn_if_fail (g_task_get_source_tag (G_TASK (res)) ==
                   flatpak_polkit_agent_text_listener_initiate_authentication);
 
-  if (g_simple_async_result_propagate_error (G_SIMPLE_ASYNC_RESULT (res), error))
-    return FALSE;
-
-  return TRUE;
+  return g_task_propagate_boolean (G_TASK (res), error);
 }
